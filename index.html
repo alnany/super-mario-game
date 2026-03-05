@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Super Mario</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #5c94fc;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Press Start 2P', monospace;
+      overflow: hidden;
+    }
+    #ui {
+      display: flex;
+      gap: 60px;
+      color: white;
+      font-size: 12px;
+      margin-bottom: 8px;
+      text-shadow: 2px 2px 0 #000;
+      letter-spacing: 1px;
+    }
+    #gameCanvas {
+      border: 3px solid #000;
+      image-rendering: pixelated;
+      display: block;
+    }
+    #overlay {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      color: white;
+      text-shadow: 3px 3px 0 #000;
+      pointer-events: none;
+    }
+    #overlay h1 { font-size: 36px; margin-bottom: 20px; color: #ffd700; }
+    #overlay p  { font-size: 14px; animation: blink 1s step-end infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    #overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <span>MARIO<br><span id="score">000000</span></span>
+    <span>COINS<br><span id="coins">00</span></span>
+    <span>WORLD<br>1-1</span>
+    <span>TIME<br><span id="timer">400</span></span>
+    <span>LIVES<br><span id="lives">3</span></span>
+  </div>
+  <canvas id="gameCanvas" width="768" height="432"></canvas>
+  <div id="overlay">
+    <h1>SUPER MARIO</h1>
+    <p>PRESS ENTER TO START</p>
+  </div>
+
+  <script>
+  const TILE = 48, W = 768, H = 432, GRAVITY = 0.55, GROUND_Y = H - TILE;
+  const C = {
+    sky:'#5c94fc',ground:'#c84c0c',groundTop:'#e86819',brick:'#c84c0c',brickFace:'#e86819',
+    question:'#e8a800',questionFace:'#ffd700',pipe:'#00a800',pipeLight:'#00d800',
+    mario:'#e40058',marioSkin:'#ffa044',marioCap:'#e40058',marioShoe:'#8b3000',
+    goomba:'#c87000',goombaDark:'#8b4500',coin:'#ffd700',coinShine:'#fff',
+    cloud:'#fff',bush:'#00a800',hill:'#00a800',hillLight:'#00c800',
+  };
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  const keys = {};
+  document.addEventListener('keydown', e => { keys[e.code] = true; e.preventDefault(); });
+  document.addEventListener('keyup',   e => { keys[e.code] = false; });
+  let state='title',score=0,coins=0,lives=3,timeLeft=400,timerTick=0,cameraX=0,particles=[],coinAnims=[];
+  const ROWS = 9;
+  const rawMap = `
+......................................................................................F
+......................................................................................F
+......................................................................................F
+......................................................................................F
+.....B.B.B......B..............QBQ.....BB.B......B..................................FFF
+.....Q...Q..........Q.Q........................................Q.....................FFFF
+.E...........E...............................E.E...........E..........................
+GGGGGGGGGGGGGGG.GGGGGGGGGGGG.GGGGGGGGGGGGGGGGGGGGG..GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG
+GGGGGGGGGGGGGGG.GGGGGGGGGGGG.GGGGGGGGGGGGGGGGGGGGG..GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG
+`.trim().split('\n').reverse();
+  const MAP_COLS = rawMap[0].length, MAP_W = MAP_COLS * TILE;
+  const tiles=[], enemies=[];
+  const flagCol = rawMap[0].indexOf('F') !== -1 ? rawMap[0].indexOf('F') : MAP_COLS-2;
+  let flagPole = { x: flagCol*TILE+TILE/2, y:0, height:ROWS*TILE };
+  for (let row=0;row<rawMap.length;row++) for (let col=0;col<MAP_COLS;col++) {
+    const ch=rawMap[row][col], tx=col*TILE, ty=(ROWS-1-row)*TILE;
+    if(ch==='G') tiles.push({type:'ground',x:tx,y:ty,w:TILE,h:TILE,solid:true});
+    if(ch==='B') tiles.push({type:'brick',x:tx,y:ty,w:TILE,h:TILE,solid:true,hit:false});
+    if(ch==='Q') tiles.push({type:'question',x:tx,y:ty,w:TILE,h:TILE,solid:true,hit:false,contains:'coin'});
+    if(ch==='E') enemies.push(mkGoomba(tx,ty));
+  }
+  [[13,1],[27,2]].forEach(([col,height])=>{ for(let h=0;h<height;h++) { const ty=(ROWS-1-h)*TILE; tiles.push({type:'pipe',x:col*TILE,y:ty,w:TILE*2,h:TILE,solid:true,pipeTop:h===height-1}); } });
+  let mario = mkMario();
+  function mkMario(){return{x:TILE*2,y:GROUND_Y-TILE,w:38,h:44,vx:0,vy:0,onGround:false,dir:1,frame:0,walkTimer:0,dead:false,invincible:0};}
+  function mkGoomba(x,y){return{x,y,w:TILE-4,h:TILE-8,vx:-1.4,vy:0,onGround:false,dead:false,squish:0,squishTimer:0};}
+  function rectOverlap(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;}
+  function resolveV(e,tl){
+    e.onGround=false;
+    for(const t of tl){if(!t.solid||!rectOverlap(e,t))continue;
+      const oY=(e.y+e.h)-t.y,oT=(t.y+t.h)-e.y;
+      if(e.vy>=0&&oY>0&&oY<e.h*0.8){e.y=t.y-e.h;e.vy=0;e.onGround=true;}
+      else if(e.vy<0&&oT>0&&oT<e.h*0.8){e.y=t.y+t.h;e.vy=0;hitTile(t,e);}}
+  }
+  function resolveH(e,tl){
+    for(const t of tl){if(!t.solid||!rectOverlap(e,t))continue;
+      const oR=(e.x+e.w)-t.x,oL=(t.x+t.w)-e.x;
+      if(e.vx>0&&oR>0&&oR<e.w){e.x=t.x-e.w;e.vx=0;}
+      else if(e.vx<0&&oL>0&&oL<e.w){e.x=t.x+t.w;e.vx=0;}}
+  }
+  function hitTile(t,m){
+    if(t.hit)return;
+    if(t.type==='question'){t.hit=true;t.type='used';score+=100;coins++;spawnCA(t.x+TILE/2,t.y);spawnSP(t.x+TILE/2,t.y,'+100');}
+    else if(t.type==='brick'){t.hit=true;score+=50;spawnBP(t.x+TILE/2,t.y+TILE/2);t.solid=false;t.type='broken';}
+  }
+  function spawnCA(x,y){coinAnims.push({x,y,vy:-8,life:40});}
+  function spawnSP(x,y,text){particles.push({x,y,vy:-1.5,text,life:50,type:'score'});}
+  function spawnBP(x,y){for(let i=0;i<6;i++){const a=(Math.PI*2/6)*i;particles.push({x,y,vx:Math.cos(a)*3,vy:Math.sin(a)*3-4,life:30,type:'brick'});}}
+  function update(){
+    if(state!=='playing')return;
+    timerTick++;if(timerTick%60===0){timeLeft=Math.max(0,timeLeft-1);}
+    if(timeLeft===0&&!mario.dead)killMario();
+    const run=keys['ShiftLeft']||keys['ShiftRight'],accel=run?.5:.35,maxS=run?6:4;
+    if(!mario.dead){
+      if(keys['ArrowLeft']||keys['KeyA']){mario.vx=Math.max(mario.vx-accel,-maxS);mario.dir=-1;}
+      else if(keys['ArrowRight']||keys['KeyD']){mario.vx=Math.min(mario.vx+accel,maxS);mario.dir=1;}
+      else{mario.vx*=0.82;if(Math.abs(mario.vx)<0.1)mario.vx=0;}
+      if((keys['Space']||keys['ArrowUp']||keys['KeyW'])&&mario.onGround){mario.vy=-13;mario.onGround=false;}
+    } else mario.vx=0;
+    mario.vy+=GRAVITY;mario.x+=mario.vx;resolveH(mario,tiles);mario.y+=mario.vy;resolveV(mario,tiles);
+    if(mario.x<0){mario.x=0;mario.vx=0;}
+    if(mario.onGround&&Math.abs(mario.vx)>0.5){mario.walkTimer++;if(mario.walkTimer%6===0)mario.frame=(mario.frame+1)%3;}
+    else if(mario.onGround)mario.frame=0; else mario.frame=3;
+    if(mario.invincible>0)mario.invincible--;
+    enemies.forEach(g=>{
+      if(g.dead){g.squishTimer--;return;}
+      g.vy+=GRAVITY;g.x+=g.vx;resolveH(g,tiles);g.y+=g.vy;resolveV(g,tiles);
+      if(g.x<=0||g.x+g.w>=MAP_W)g.vx*=-1;
+      let onEdge=true;for(const t of tiles)if(t.solid&&t.y===g.y+g.h&&t.x<g.x+g.w&&t.x+t.w>g.x){onEdge=false;break;}
+      if(onEdge&&g.onGround)g.vx*=-1;
+      if(!mario.dead&&mario.invincible===0&&rectOverlap(mario,{x:g.x+4,y:g.y+4,w:g.w-8,h:g.h-8})){
+        if(mario.vy>0&&mario.y+mario.h<g.y+g.h*0.5){g.dead=true;g.squishTimer=25;mario.vy=-9;score+=200;spawnSP(g.x+g.w/2,g.y,'+200');}
+        else killMario();
+      }
+    });
+    cameraX=Math.min(Math.max(mario.x-W/3,0),MAP_W-W);
+    particles.forEach(p=>{p.x+=p.vx||0;p.y+=p.vy||0;if(p.type==='brick')p.vy+=0.4;p.life--;});
+    particles=particles.filter(p=>p.life>0);
+    coinAnims.forEach(c=>{c.y+=c.vy;c.vy+=0.4;c.life--;});coinAnims=coinAnims.filter(c=>c.life>0);
+    if(mario.y>H+100){if(!mario.dead)killMario();else{lives--;respawn();}}
+    if(!mario.dead&&mario.x+mario.w>flagPole.x-4&&mario.x<flagPole.x+8){score+=1000;state='win';}
+    document.getElementById('score').textContent=String(score).padStart(6,'0');
+    document.getElementById('coins').textContent=String(coins).padStart(2,'0');
+    document.getElementById('timer').textContent=timeLeft;
+    document.getElementById('lives').textContent=lives;
+  }
+  function killMario(){if(mario.dead)return;mario.dead=true;mario.vy=-14;mario.vx=0;setTimeout(()=>{lives--;if(lives<=0){state='gameover';}else respawn();},2000);}
+  function respawn(){mario=mkMario();timeLeft=400;timerTick=0;cameraX=0;state='playing';}
+  const px=x=>Math.round(x-cameraX);
+  function drawGround(t){ctx.fillStyle=C.groundTop;ctx.fillRect(px(t.x),t.y,t.w,6);ctx.fillStyle=C.ground;ctx.fillRect(px(t.x),t.y+6,t.w,t.h-6);ctx.strokeStyle='#a03408';ctx.lineWidth=1;ctx.strokeRect(px(t.x)+.5,t.y+.5,t.w-1,t.h-1);}
+  function drawBrick(t){ctx.fillStyle=C.brick;ctx.fillRect(px(t.x),t.y,t.w,t.h);ctx.fillStyle=C.brickFace;ctx.fillRect(px(t.x)+2,t.y+2,t.w/2-4,t.h/2-4);ctx.fillRect(px(t.x)+t.w/2+2,t.y+2,t.w/2-4,t.h/2-4);ctx.fillRect(px(t.x)+4,t.y+t.h/2+2,t.w-8,t.h/2-4);ctx.strokeStyle='#a03408';ctx.lineWidth=1;ctx.strokeRect(px(t.x)+.5,t.y+.5,t.w-1,t.h-1);}
+  function drawQ(t){ctx.fillStyle=t.hit?'#888':C.question;ctx.fillRect(px(t.x),t.y,t.w,t.h);if(!t.hit){ctx.fillStyle=C.questionFace;ctx.font='bold 26px monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('?',px(t.x)+t.w/2,t.y+t.h/2+2);}ctx.strokeStyle='#a07000';ctx.lineWidth=1;ctx.strokeRect(px(t.x)+.5,t.y+.5,t.w-1,t.h-1);}
+  function drawPipe(t){ctx.fillStyle=C.pipe;ctx.fillRect(px(t.x)+4,t.y,t.w-8,t.h);ctx.fillStyle=C.pipeLight;ctx.fillRect(px(t.x)+8,t.y+2,10,t.h-4);if(t.pipeTop){ctx.fillStyle=C.pipe;ctx.fillRect(px(t.x),t.y,t.w,t.h/2);ctx.fillStyle=C.pipeLight;ctx.fillRect(px(t.x)+6,t.y+3,10,t.h/2-6);}ctx.strokeStyle='#006000';ctx.lineWidth=1;ctx.strokeRect(px(t.x)+.5,t.y+.5,t.w-1,t.h-1);}
+  function drawMario(){const x=px(mario.x),y=mario.y,d=mario.dir;if(mario.dead){ctx.save();drawMS(x,y,0,d,true);ctx.restore();return;}if(mario.invincible%4<2)drawMS(x,y,mario.frame,d,false);}
+  function drawMS(x,y,frame,dir,dead){
+    const w=mario.w,h=mario.h;ctx.save();
+    if(dir===-1){ctx.translate(x+w,y);ctx.scale(-1,1);}else ctx.translate(x,y);
+    if(dead){ctx.fillStyle=C.marioCap;ctx.fillRect(2,0,w-4,10);ctx.fillStyle=C.marioSkin;ctx.fillRect(4,10,w-8,14);ctx.fillStyle=C.mario;ctx.fillRect(2,24,w-4,12);ctx.fillStyle=C.marioShoe;ctx.fillRect(0,36,w/2-2,8);ctx.fillRect(w/2+2,36,w/2-2,8);}
+    else{
+      ctx.fillStyle=C.marioCap;ctx.fillRect(4,0,w-8,8);ctx.fillRect(0,6,w,6);
+      ctx.fillStyle=C.marioSkin;ctx.fillRect(4,10,w-8,12);
+      ctx.fillStyle='#fff';ctx.fillRect(frame===0?6:4,12,8,6);
+      ctx.fillStyle='#000';ctx.fillRect(frame===0?8:6,14,4,4);
+      ctx.fillStyle='#6b3300';ctx.fillRect(2,20,w-4,4);
+      ctx.fillStyle=C.mario;ctx.fillRect(2,22,w-4,12);
+      ctx.fillStyle='#ffd700';ctx.fillRect(w/2-3,25,6,4);
+      ctx.fillStyle=C.marioSkin;
+      if(frame===1||frame===3){ctx.fillRect(-4,22,8,6);ctx.fillRect(w-4,24,8,6);}
+      else{ctx.fillRect(-2,24,6,6);ctx.fillRect(w-4,26,6,6);}
+      ctx.fillStyle=C.mario;
+      const lo=frame===1?-4:frame===2?4:0;
+      ctx.fillRect(2,34,w/2-4,8);ctx.fillRect(w/2+2,34,w/2-4,8);
+      ctx.fillStyle=C.marioShoe;
+      ctx.fillRect(0,38+lo*0.5,w/2-2,6);ctx.fillRect(w/2+2,38-lo*0.5,w/2-2,6);
+    }
+    ctx.restore();
+  }
+  function drawGoomba(g){
+    if(g.squishTimer>0&&g.squishTimer<20){ctx.fillStyle=C.goomba;ctx.fillRect(px(g.x),g.y+g.h-12,g.w,12);ctx.fillStyle=C.goombaDark;ctx.fillRect(px(g.x)+4,g.y+g.h-8,8,6);ctx.fillRect(px(g.x)+g.w-12,g.y+g.h-8,8,6);return;}
+    if(g.dead&&g.squishTimer<=0)return;
+    const x=px(g.x),y=g.y;
+    ctx.fillStyle=C.goomba;ctx.fillRect(x+4,y,g.w-8,g.h);ctx.fillRect(x,y+8,g.w,g.h-16);
+    ctx.fillStyle=C.goombaDark;ctx.fillRect(x+2,y+g.h-12,g.w/2-4,12);ctx.fillRect(x+g.w/2+2,y+g.h-12,g.w/2-4,12);
+    ctx.fillStyle='#fff';ctx.fillRect(x+6,y+6,10,8);ctx.fillRect(x+g.w-16,y+6,10,8);
+    ctx.fillStyle='#000';ctx.fillRect(x+8,y+8,5,5);ctx.fillRect(x+g.w-13,y+8,5,5);
+    ctx.fillStyle=C.goombaDark;ctx.fillRect(x+5,y+4,12,3);ctx.fillRect(x+g.w-17,y+4,12,3);
+  }
+  function drawBG(){
+    ctx.fillStyle=C.sky;ctx.fillRect(0,0,W,H);
+    [80,280,500,720,950,1200,1500,1800,2100,2400,2700,3000].forEach(cx=>{
+      const sx=((cx-cameraX*0.3)%(MAP_W+200))-100;drawCloud(sx,40);});
+    [[0,200],[400,180],[900,220],[1400,190],[1900,210],[2400,200],[2900,180]].forEach(([hx,hy])=>{
+      const sx=hx-cameraX*0.6;if(sx>-200&&sx<W+200)drawHill(sx,hy);});
+    [[100,GROUND_Y-20],[350,GROUND_Y-20],[600,GROUND_Y-20],[850,GROUND_Y-20],[1100,GROUND_Y-20],
+     [1350,GROUND_Y-20],[1600,GROUND_Y-20],[1900,GROUND_Y-20],[2200,GROUND_Y-20],[2500,GROUND_Y-20],[2800,GROUND_Y-20]
+    ].forEach(([bx,by])=>{const sx=bx-cameraX;if(sx>-100&&sx<W+100)drawBush(sx,by);});
+  }
+  function drawCloud(x,y){ctx.fillStyle=C.cloud;ctx.fillRect(x+20,y,60,20);ctx.fillRect(x+10,y+8,80,24);ctx.fillRect(x,y+16,100,20);ctx.fillStyle='rgba(200,220,255,0.4)';ctx.fillRect(x+5,y+4,30,14);}
+  function drawHill(x,y){ctx.fillStyle=C.hill;ctx.beginPath();ctx.arc(x,y,70,Math.PI,0);ctx.fill();ctx.fillStyle=C.hillLight;ctx.beginPath();ctx.arc(x-15,y-10,25,Math.PI,0);ctx.fill();}
+  function drawBush(x,y){ctx.fillStyle=C.bush;ctx.fillRect(x,y+14,60,16);ctx.fillRect(x+10,y+4,40,26);ctx.fillRect(x+20,y,20,30);ctx.fillStyle='#00c800';ctx.fillRect(x+14,y+6,14,12);}
+  function drawFlag(){const fx=px(flagPole.x);ctx.fillStyle='#888';ctx.fillRect(fx-2,0,4,H-TILE);ctx.fillStyle='#00a800';ctx.fillRect(fx,20,28,20);ctx.fillStyle='#ffd700';ctx.beginPath();ctx.arc(fx,16,8,0,Math.PI*2);ctx.fill();}
+  function drawParticles(){
+    particles.forEach(p=>{if(p.type==='score'){ctx.fillStyle='#ffd700';ctx.font='bold 14px monospace';ctx.textAlign='center';ctx.fillText(p.text,px(p.x),p.y);}else if(p.type==='brick'){ctx.fillStyle=C.brick;ctx.fillRect(px(p.x)-6,p.y-6,12,12);}});
+    coinAnims.forEach(c=>{ctx.fillStyle=C.coin;ctx.fillRect(px(c.x)-8,c.y,16,24);ctx.fillStyle=C.coinShine;ctx.fillRect(px(c.x)-2,c.y+4,5,12);});
+  }
+  function render(){
+    ctx.clearRect(0,0,W,H);drawBG();drawFlag();
+    tiles.forEach(t=>{if(px(t.x)>W+TILE*2||px(t.x)<-TILE*3||t.type==='broken')return;
+      if(t.type==='ground')drawGround(t);
+      else if(t.type==='brick')drawBrick(t);
+      else if(t.type==='question'||t.type==='used')drawQ(t);
+      else if(t.type==='pipe')drawPipe(t);});
+    enemies.forEach(g=>drawGoomba(g));drawMario();drawParticles();
+    if(state==='win'){ctx.fillStyle='rgba(0,0,0,0.5)';ctx.fillRect(0,0,W,H);ctx.fillStyle='#ffd700';ctx.font='bold 40px monospace';ctx.textAlign='center';ctx.fillText('YOU WIN!',W/2,H/2-20);ctx.fillStyle='#fff';ctx.font='18px monospace';ctx.fillText('SCORE: '+score,W/2,H/2+20);ctx.fillText('PRESS ENTER TO PLAY AGAIN',W/2,H/2+55);}
+    if(state==='gameover'){ctx.fillStyle='rgba(0,0,0,0.7)';ctx.fillRect(0,0,W,H);ctx.fillStyle='#e40000';ctx.font='bold 40px monospace';ctx.textAlign='center';ctx.fillText('GAME OVER',W/2,H/2-20);ctx.fillStyle='#fff';ctx.font='16px monospace';ctx.fillText('PRESS ENTER TO RETRY',W/2,H/2+30);}
+  }
+  document.addEventListener('keydown',e=>{
+    if(e.code!=='Enter')return;
+    if(state==='title'){state='playing';document.getElementById('overlay').classList.add('hidden');}
+    else if(state==='win'||state==='gameover'){
+      enemies.length=0;
+      tiles.forEach(t=>{if(t.type==='used')t.type='question';if(t.type==='broken'){t.type='brick';t.solid=true;}t.hit=false;});
+      for(let r=0;r<rawMap.length;r++)for(let c=0;c<MAP_COLS;c++)if(rawMap[r][c]==='E')enemies.push(mkGoomba(c*TILE,(ROWS-1-r)*TILE));
+      score=0;coins=0;lives=3;timeLeft=400;timerTick=0;cameraX=0;mario=mkMario();particles=[];coinAnims=[];state='playing';
+    }
+  });
+  function loop(){update();render();requestAnimationFrame(loop);}
+  loop();
+  </script>
+</body>
+</html>
